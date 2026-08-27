@@ -6,7 +6,6 @@ import os
 import re
 import sys
 import time
-import unittest
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -23,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed._composable import checkpoint
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.distributed_c10d import get_default_backend_for_device
 from torch.distributed.fsdp import (
     CPUOffload,
     fully_shard,
@@ -74,17 +74,13 @@ if TEST_WITH_ROCM:
 else:
     DEVICE_COUNT = 4
 
-if TEST_CUDA:
-    DEVICE_TYPE = "cuda"
-    DISTRIBUTED_BACKEND = "nccl"
-    DEVICE_COUNT = torch.cuda.device_count()
-elif TEST_HPU:
-    DEVICE_TYPE = "hpu:0"
-    DISTRIBUTED_BACKEND = "hccl"
-elif TEST_XPU:
-    DEVICE_TYPE = "xpu"
-    DISTRIBUTED_BACKEND = "xccl"
-    DEVICE_COUNT = torch.xpu.device_count()
+if torch.accelerator.is_available():
+    acc = torch.accelerator.current_accelerator()
+    DEVICE_TYPE = acc.type
+    # Use the backend registered for this accelerator type. If no backend is
+    # registered, the accelerator's companion plugin is missing or broken.
+    DISTRIBUTED_BACKEND = get_default_backend_for_device(acc)
+    DEVICE_COUNT = torch.accelerator.device_count()
 else:
     DEVICE_TYPE = "cpu"
     DISTRIBUTED_BACKEND = "gloo"
@@ -1172,7 +1168,6 @@ def check_sharded_parity(
         cls.assertEqual(sharded_param.grad.to_local(), sharded_ref_grad.to_local())
 
 
-@unittest.skipIf(TEST_XPU, "not-support-multithread")
 class FSDPTestMultiThread(MultiThreadedTestCase):
     @property
     def world_size(self):
@@ -1219,7 +1214,7 @@ class FSDPTestMixin:
 
         print(f"dist init r={self.rank}, world={self.world_size}")
         if DEVICE_TYPE != "cpu" and torch.accelerator.device_count() < self.world_size:
-            sys.exit(TEST_SKIPS[f"multi-gpu-{self.world_size}"].exit_code)
+            sys.exit(TEST_SKIPS[f"multi-device-{self.world_size}"].exit_code)
 
         # Specify gloo backend to make 'init_process_group()' succeed,
         # Actual tests will be skipped if there are not enough GPUs.
@@ -1247,7 +1242,7 @@ class FSDPTestMixin:
 
         device_ids = None
         device_id = self.rank % DEVICE_COUNT
-        if TEST_CUDA or TEST_XPU:
+        if torch.accelerator.is_available():
             torch.accelerator.set_device_index(device_id)
         device_ids = [device_id]
 
@@ -1562,7 +1557,7 @@ class FSDPTest(FSDPTestMixin, MultiProcessTestCase):
 
         print(f"dist init r={self.rank}, world={self.world_size}")
         if torch.accelerator.device_count() < self.world_size:
-            sys.exit(TEST_SKIPS[f"multi-gpu-{self.world_size}"].exit_code)
+            sys.exit(TEST_SKIPS[f"multi-device-{self.world_size}"].exit_code)
 
         # Specify gloo backend to make 'init_process_group()' succeed,
         # Actual tests will be skipped if there are not enough GPUs.
@@ -1590,7 +1585,7 @@ class FSDPTest(FSDPTestMixin, MultiProcessTestCase):
 
         device_ids = None
         device_id = self.rank % DEVICE_COUNT
-        if TEST_CUDA or TEST_XPU:
+        if torch.accelerator.is_available():
             torch.accelerator.set_device_index(device_id)
         device_ids = [device_id]
 
@@ -1634,10 +1629,10 @@ class FSDPTestContinuous(FSDPTestMixin, MultiProcContinuousTest):
         os.environ["TORCH_NCCL_DESYNC_DEBUG"] = "0"
 
         if torch.accelerator.device_count() < world_size:
-            sys.exit(TEST_SKIPS[f"multi-gpu-{world_size}"].exit_code)
+            sys.exit(TEST_SKIPS[f"multi-device-{world_size}"].exit_code)
 
         device_id = rank % DEVICE_COUNT
-        if TEST_CUDA or TEST_XPU:
+        if torch.accelerator.is_available():
             torch.accelerator.set_device_index(device_id)
 
         super()._init_pg(rank, world_size, rdvz_file)
